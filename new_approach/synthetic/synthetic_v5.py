@@ -527,7 +527,7 @@ def draw_chart_matplotlib(
                 dash_start = (base_x, base_y)
                 dash_end = (dash_start[0] + dash_dx, dash_start[1] + dash_dy)
                 ax1.plot([dash_start[0], dash_end[0]], [dash_start[1], dash_end[1]],
-                        color="black", linewidth=0.6, linestyle=(0, (6, 4)))
+                    color="black", linewidth=0.6, linestyle=(0, (14, 8)))
             
             # Fuel flow label (after dashed line)
             label_x = x_tail + random.uniform(0.06, 0.10)
@@ -546,7 +546,7 @@ def draw_chart_matplotlib(
             dash_dx = dash_len * math.cos(dash_angle)
             dash_dy = dash_len * math.sin(dash_angle)
             ax1.plot([cx, cx + dash_dx], [cy, cy + dash_dy],
-                    color="black", linewidth=0.5, linestyle=(0, (5, 3)))
+                    color="black", linewidth=0.5, linestyle=(0, (12, 7)))
     
     # Text boxes
     if config.add_text_boxes:
