@@ -138,6 +138,32 @@ def analyze_real_image(real_img):
     return edges, cleaned
 
 
+def extract_curves_classic(real_img):
+    """Attempt to extract curves using classic CV steps similar to synthetic pipeline."""
+    gray = cv2.cvtColor(real_img, cv2.COLOR_RGB2GRAY)
+
+    # Enhance dark strokes (curves) using blackhat
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    blackhat = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+
+    # Threshold to get dark strokes
+    _, binary = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Remove long horizontal/vertical lines (grid/axes) via morphology
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+    h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
+    v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
+    lines = cv2.bitwise_or(h_lines, v_lines)
+    curves = cv2.bitwise_and(binary, cv2.bitwise_not(lines))
+
+    # Clean up noise
+    curves = cv2.morphologyEx(curves, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    curves = cv2.morphologyEx(curves, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+    return curves
+
+
 def generate_synthetic_samples(n=5, output_dir='synthetic_samples'):
     """Generate multiple synthetic samples for inspection."""
     
@@ -178,6 +204,18 @@ def main():
         print("1. Görüntü Analizi (Klasik CV)")
         print("-" * 40)
         analyze_real_image(real_img)
+
+        print("\n" + "-" * 40)
+        print("1b. Curve Extraction (Klasik CV Denemesi)")
+        print("-" * 40)
+        curves_mask = extract_curves_classic(real_img)
+        cv2.imwrite('curves_extracted.png', curves_mask)
+        print("✅ Curve mask kaydedildi: curves_extracted.png")
+        plt.figure(figsize=(6, 6))
+        plt.imshow(curves_mask, cmap='gray')
+        plt.title('Extracted Curves (Classic CV)')
+        plt.axis('off')
+        plt.show()
         
         print("\n" + "-" * 40)
         print("2. Sentetik Veri Karşılaştırması")
