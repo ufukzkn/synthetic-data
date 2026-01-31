@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+*.whl
+.Python
+venv/
+.venv/
+ENV/
+.env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+
+# Data/outputs
+models/
+out_curves/
+generated_images/
+backup_original/
+*.pt
+*.pth
+*.onnx
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.csv
+
+# Logs
+*.log
+history.json

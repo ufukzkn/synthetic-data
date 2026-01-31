@@ -320,6 +320,31 @@ def generate_curve_shape(
                 progress = (t - peak_pos) / (1 - peak_pos)
                 y[i] = peak_y - (peak_y - end_y) * (progress ** 0.7)
                 
+    elif curve_type == 'peaked_oval':
+        peak_pos = 0.45 + random.uniform(-0.07, 0.07)
+        start_y = 0.12 + random.uniform(-0.02, 0.02)
+        peak_y = 0.45 + alt * 0.38 + random.uniform(-0.03, 0.03)
+        end_y = 0.20 + alt * 0.25 + random.uniform(-0.02, 0.02)
+        
+        y = np.zeros_like(x_norm)
+        for i, t in enumerate(x_norm):
+            if t <= peak_pos:
+                progress = t / peak_pos
+                y[i] = start_y + (peak_y - start_y) * (math.sin(progress * math.pi / 2) ** 1.2)
+            else:
+                progress = (t - peak_pos) / (1 - peak_pos)
+                y[i] = end_y + (peak_y - end_y) * (math.cos(progress * math.pi / 2) ** 1.2)
+                
+    elif curve_type == 'wavy':
+        freq = random.choice([1.0, 1.5, 2.0])
+        phase = random.uniform(0, 1)
+        wave = 0.5 + 0.25 * np.sin(2 * np.pi * (x_norm * freq + phase))
+        wave += 0.12 * np.sin(4 * np.pi * (x_norm * freq + phase))
+        hump_center = random.uniform(0.55, 0.70)
+        hump = 0.12 * np.exp(-((x_norm - hump_center) / 0.22) ** 2)
+        y = wave + hump
+        y = np.clip(y, 0.05, 0.95)
+        
     elif curve_type == 'rising':
         start_y = 0.08 + alt * 0.05 + random.uniform(-0.02, 0.02)
         end_y = 0.55 + alt * 0.30 + random.uniform(-0.03, 0.03)
@@ -333,7 +358,7 @@ def generate_curve_shape(
         y = start_y - (start_y - end_y) * (x_norm ** curvature)
         
     else:  # mixed
-        return generate_curve_shape(x, random.choice(['peaked', 'rising', 'falling']),
+        return generate_curve_shape(x, random.choice(['peaked', 'peaked_oval', 'rising', 'falling', 'wavy']),
                                    curve_index, total_curves)
     
     return y
@@ -627,11 +652,26 @@ def random_config() -> ChartConfig:
     x_min, x_max = random.choice(x_ranges)
     y_min, y_max = random.choice(y_ranges)
     
+    # Ağırlıklı curve type seçimi
+    # peaked_oval: 28%, peaked: 26%, rising: 16%, falling: 14%, wavy: 10%, mixed: 6%
+    curve_types = ['peaked_oval'] * 28 + ['peaked'] * 26 + ['rising'] * 16 + ['falling'] * 14 + ['wavy'] * 10 + ['mixed'] * 6
+    curve_type = random.choice(curve_types)
+    
+    # Curve type'a göre farklı eğri sayıları
+    if curve_type == 'wavy':
+        n_curves = random.randint(3, 6)
+    elif curve_type in ['falling', 'mixed']:
+        n_curves = random.randint(4, 7)
+    elif curve_type == 'rising':
+        n_curves = random.randint(5, 8)
+    else:  # peaked, peaked_oval
+        n_curves = random.randint(6, 12)
+    
     return ChartConfig(
         x_min=x_min, x_max=x_max,
         y_min=y_min, y_max=y_max,
-        n_curves=random.randint(4, 12),
-        curve_type=random.choice(['peaked', 'peaked', 'rising', 'falling', 'mixed']),
+        n_curves=n_curves,
+        curve_type=curve_type,
         curve_lw=random.uniform(0.3, 0.6),  # Random thickness (0.3=very thin, 0.6=normal)
         add_grid=random.random() < 0.95,
         add_arrows=random.random() < 0.85,
@@ -672,21 +712,34 @@ def add_scan_artifacts(img: np.ndarray, strength: float = 1.0) -> np.ndarray:
 
 def make_sample(W: int = 512, H: int = 512, seed: int = None,
                 add_artifacts: bool = True) -> Tuple[np.ndarray, np.ndarray]:
-    """Generate a training sample."""
+    """
+    Generate a training sample.
+    
+    Returns:
+        input_img: Noisy chart image (BGR)
+        target_img: Clean colored curves on black background (BGR)
+    """
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
     
     config = random_config()
-    full_img, mask, _ = draw_chart_matplotlib(config, W, H)
+    full_img, mask, curves_data = draw_chart_matplotlib(config, W, H)
     
     if add_artifacts:
         full_img = add_scan_artifacts(full_img)
     
+    # Generate colored curves target (black background)
+    target_colored = colorize_curves_from_data(
+        curves_data, config, W, H, 
+        show_axes=False, 
+        black_background=True
+    )
+    
     # Convert RGB to BGR for OpenCV
     full_img_bgr = cv2.cvtColor(full_img, cv2.COLOR_RGB2BGR)
     
-    return full_img_bgr, mask
+    return full_img_bgr, target_colored
 
 
 def colorize_curves_from_data(
@@ -696,12 +749,16 @@ def colorize_curves_from_data(
     H: int,
     show_axes: bool = True,
     axis_result: Optional[AxisDetectionResult] = None,
-    full_img_rgb: Optional[np.ndarray] = None
+    full_img_rgb: Optional[np.ndarray] = None,
+    black_background: bool = False
 ) -> np.ndarray:
     """
     Render colored curves directly from curve data so each curve
     gets a distinct color even if components touch.
     Also draws X and Y axes for reference.
+    
+    Args:
+        black_background: If True, use black background (for training target)
     """
     fig_w, fig_h = W / 100, H / 100
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
@@ -709,8 +766,10 @@ def colorize_curves_from_data(
     ax.set_ylim(config.y_min, config.y_max)
     ax.set_position([0, 0, 1, 1])
     ax.axis('off')
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('white')
+    
+    bg_color = 'black' if black_background else 'white'
+    fig.patch.set_facecolor(bg_color)
+    ax.set_facecolor(bg_color)
     
     # Draw X and Y axes
     if show_axes:
@@ -765,7 +824,7 @@ def colorize_curves_from_data(
 if __name__ == "__main__":
     import os
     
-    print("Generating V5 samples (matplotlib arrows, thin curves)...")
+    print("Generating V5 samples (colored curves output)...")
     
     # Test different types
     for ctype in ['peaked', 'rising', 'falling']:
@@ -781,27 +840,25 @@ if __name__ == "__main__":
         )
         
         full, mask, curves = draw_chart_matplotlib(config, W=800, H=600)
-        colored = colorize_curves_from_data(curves, config, W=800, H=600, show_axes=False)
+        # Colored curves on BLACK background (training target)
+        colored_target = colorize_curves_from_data(curves, config, W=800, H=600, show_axes=False, black_background=True)
+        # Colored curves on WHITE background (visualization)
+        colored_viz = colorize_curves_from_data(curves, config, W=800, H=600, show_axes=False, black_background=False)
         
         cv2.imwrite(f'v5_{ctype}.png', cv2.cvtColor(full, cv2.COLOR_RGB2BGR))
-        cv2.imwrite(f'v5_{ctype}_mask.png', mask)
-        cv2.imwrite(f'v5_{ctype}_colored.png', colored)
-        print(f"  ✓ v5_{ctype}.png")
+        cv2.imwrite(f'v5_{ctype}_target.png', colored_target)  # This is the new target!
+        cv2.imwrite(f'v5_{ctype}_colored.png', colored_viz)
+        print(f"  ✓ v5_{ctype}.png + target")
     
-    # Random samples
-    print("\nRandom samples with artifacts:")
+    # Random samples with new make_sample() that returns colored target
+    print("\nRandom samples (input + colored target):")
     for i in range(5):
-        if i * 10 is not None:
-            random.seed(i * 10)
-            np.random.seed(i * 10)
-        config = random_config()
-        full, mask, curves = draw_chart_matplotlib(config, W=512, H=512)
-        full = add_scan_artifacts(full)
-        full_bgr = cv2.cvtColor(full, cv2.COLOR_RGB2BGR)
-        colored = colorize_curves_from_data(curves, config, W=512, H=512, show_axes=False)
-        cv2.imwrite(f'v5_random_{i}.png', full_bgr)
-        cv2.imwrite(f'v5_random_{i}_mask.png', mask)
-        cv2.imwrite(f'v5_random_{i}_colored.png', colored)
-        print(f"  ✓ v5_random_{i}.png")
+        input_img, target_img = make_sample(W=512, H=512, seed=i*10, add_artifacts=True)
+        cv2.imwrite(f'v5_random_{i}_input.png', input_img)
+        cv2.imwrite(f'v5_random_{i}_target.png', target_img)
+        print(f"  ✓ v5_random_{i} (input + target)")
     
     print("\n✅ Done! Check v5_*.png files")
+    print("📌 NEW: Target is now COLORED CURVES on black background!")
+    print("   - Input: noisy chart (v5_random_*_input.png)")
+    print("   - Target: clean colored curves (v5_random_*_target.png)")
