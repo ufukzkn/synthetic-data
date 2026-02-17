@@ -1,11 +1,13 @@
 """
-UNet-64 — 3-channel noise segmentation model.
+UNet-64 -- 2-channel noise segmentation model.
 
 Input:  RGB image  [B, 3, H, W]  float [0,1]
-Output: Noise mask [B, 3, H, W]  float [0,1]
-        R = arrows, G = dashed lines, B = text
+Output: Noise mask [B, 2, H, W]  float [0,1]
+        Ch0 = arrows (tip + leader line)
+        Ch1 = dashed lines
+        (Text detection is handled by Tesseract OCR in postprocess)
 
-Architecture: Encoder [64,128,256,512] → Bottleneck 1024 → Decoder with skip connections
+Architecture: Encoder [64,128,256,512] -> Bottleneck 1024 -> Decoder with skip connections
 """
 
 import torch
@@ -13,12 +15,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 # Building Blocks
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 
 class DoubleConv(nn.Module):
-    """Conv3x3 → BN → ReLU → Conv3x3 → BN → ReLU"""
+    """Conv3x3 -> BN -> ReLU -> Conv3x3 -> BN -> ReLU"""
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.net = nn.Sequential(
@@ -35,7 +37,7 @@ class DoubleConv(nn.Module):
 
 
 class Down(nn.Module):
-    """MaxPool → DoubleConv"""
+    """MaxPool -> DoubleConv"""
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.net = nn.Sequential(
@@ -48,7 +50,7 @@ class Down(nn.Module):
 
 
 class Up(nn.Module):
-    """ConvTranspose2d (upsample) → concat skip → DoubleConv"""
+    """ConvTranspose2d (upsample) -> concat skip -> DoubleConv"""
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.up = nn.ConvTranspose2d(in_ch, in_ch // 2, kernel_size=2, stride=2)
@@ -66,23 +68,23 @@ class Up(nn.Module):
         return self.conv(x)
 
 
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 # UNet-64
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 
 class UNet(nn.Module):
     """
     UNet with base features = 64.
-    Levels: 64 → 128 → 256 → 512 → 1024 (bottleneck) → decode back.
+    Levels: 64 -> 128 -> 256 -> 512 -> 1024 (bottleneck) -> decode back.
     """
-    def __init__(self, in_channels=3, out_channels=3):
+    def __init__(self, in_channels=3, out_channels=2):
         super().__init__()
         # Encoder
-        self.inc = DoubleConv(in_channels, 64)       # → 64
-        self.down1 = Down(64, 128)                    # → 128
-        self.down2 = Down(128, 256)                   # → 256
-        self.down3 = Down(256, 512)                   # → 512
-        self.down4 = Down(512, 1024)                  # → 1024 (bottleneck)
+        self.inc = DoubleConv(in_channels, 64)       # -> 64
+        self.down1 = Down(64, 128)                    # -> 128
+        self.down2 = Down(128, 256)                   # -> 256
+        self.down3 = Down(256, 512)                   # -> 512
+        self.down4 = Down(512, 1024)                  # -> 1024 (bottleneck)
 
         # Decoder
         self.up1 = Up(1024, 512)
@@ -90,7 +92,7 @@ class UNet(nn.Module):
         self.up3 = Up(256, 128)
         self.up4 = Up(128, 64)
 
-        # Final 1×1 conv (returns LOGITS — no sigmoid here)
+        # Final 1×1 conv (returns LOGITS -- no sigmoid here)
         self.outc = nn.Conv2d(64, out_channels, kernel_size=1)
 
     def forward(self, x):
@@ -107,12 +109,12 @@ class UNet(nn.Module):
         x = self.up3(x, x2)     # [B, 128, H/2, W/2]
         x = self.up4(x, x1)     # [B, 64, H, W]
 
-        return self.outc(x)  # raw logits — apply sigmoid at inference
+        return self.outc(x)  # raw logits -- apply sigmoid at inference
 
 
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 # Loss Functions
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 
 class DiceLoss(nn.Module):
     """Soft Dice Loss, computed per-channel then averaged.
@@ -122,7 +124,7 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, pred, target):
-        # pred = logits [B, C, H, W] → apply sigmoid for probabilities
+        # pred = logits [B, C, H, W] -> apply sigmoid for probabilities
         pred = torch.sigmoid(pred)
         pred_flat = pred.view(pred.size(0), pred.size(1), -1)     # [B,C,N]
         target_flat = target.view(target.size(0), target.size(1), -1)
@@ -146,7 +148,7 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
 
     def forward(self, pred, target):
-        # pred = logits — safe with AMP autocast
+        # pred = logits -- safe with AMP autocast
         bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
         prob = torch.sigmoid(pred)
         pt = torch.where(target >= 0.5, prob, 1.0 - prob)
@@ -171,7 +173,7 @@ class BCEDiceLoss(nn.Module):
             self.focal = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
 
     def forward(self, pred, target):
-        # pred = logits — all sub-losses handle sigmoid internally
+        # pred = logits -- all sub-losses handle sigmoid internally
         loss = 0.0
         if self.bce_w > 0:
             loss += self.bce_w * F.binary_cross_entropy_with_logits(pred, target)
@@ -182,9 +184,9 @@ class BCEDiceLoss(nn.Module):
         return loss
 
 
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 # Utilities
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 
 def count_parameters(model):
     """Toplam eğitilebilir parametre sayısı."""
@@ -195,7 +197,7 @@ def model_summary(model):
     """Model hakkında kısa bilgi yazdır."""
     total = count_parameters(model)
     print(f'UNet Parameters: {total:,}')
-    print(f'  ≈ {total / 1e6:.1f}M parameters')
+    print(f'  ~ {total / 1e6:.1f}M parameters')
 
     # Dummy forward to check output shape
     with torch.no_grad():
@@ -208,17 +210,17 @@ def model_summary(model):
         print(f'  Prob range:   [{out.min():.3f}, {out.max():.3f}]')
 
 
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 # TEST
-# ════════════════════════════════════════════════════════════════
+# ================================================================
 
 if __name__ == '__main__':
-    model = UNet(in_channels=3, out_channels=3)
+    model = UNet(in_channels=3, out_channels=2)
     model_summary(model)
 
     # Quick loss test (pred = logits, not probabilities)
-    pred = torch.randn(2, 3, 128, 128)  # randn for logits (can be negative)
-    target = (torch.rand(2, 3, 128, 128) > 0.8).float()
+    pred = torch.randn(2, 2, 128, 128)  # randn for logits (can be negative)
+    target = (torch.rand(2, 2, 128, 128) > 0.8).float()
 
     criterion = BCEDiceLoss(bce_weight=0.5, dice_weight=0.5)
     loss = criterion(pred, target)

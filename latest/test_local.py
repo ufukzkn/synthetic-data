@@ -6,14 +6,18 @@ Kullanım:
   python test_local.py --image-dir scans/ --model noise_unet.pt
   python test_local.py --image chart.png --model noise_unet.pt --no-grid-removal
   python test_local.py --image chart.png --model noise_unet.pt --threshold 0.3
+  python test_local.py --image chart.png --model noise_unet.pt --no-ocr
+  python test_local.py --image chart.png --model noise_unet.pt --no-trace
 
 Pipeline:
   1. Görüntüyü yükle (RGB)
   2. Grid çizgilerini kaldır (grid_removal.py)
-  3. UNet ile noise mask tahmini
-  4. Threshold → binary mask
-  5. cv2.inpaint ile temizle
-  6. Sonuçları göster / kaydet
+  3. UNet ile noise mask tahmini (2 kanal: arrows + dashed)
+  4. Arrow tip'lerden geriye leader line trace (postprocess)
+  5. Tesseract OCR ile text detection (postprocess)
+  6. Tüm mask'ları birleştir
+  7. cv2.inpaint ile temizle
+  8. Sonuçları göster / kaydet
 """
 
 import os
@@ -27,6 +31,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import UNet
 from grid_removal import remove_grid
+from postprocess import build_inpaint_mask
 
 
 # ════════════════════════════════════════════════════════════════
@@ -38,7 +43,7 @@ def load_model(model_path, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    model = UNet(in_channels=3, out_channels=3).to(device)
+    model = UNet(in_channels=3, out_channels=2).to(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -63,7 +68,8 @@ def predict_mask(model, img_rgb, device, img_size=512):
         img_size: Model input boyutu
 
     Returns:
-        pred_mask: [H, W, 3] float32 [0,1] — orijinal boyutta
+        pred_mask: [H, W, 2] float32 [0,1] — orijinal boyutta
+                   Ch0=arrows, Ch1=dashed
     """
     H_orig, W_orig = img_rgb.shape[:2]
 
@@ -77,10 +83,10 @@ def predict_mask(model, img_rgb, device, img_size=512):
 
     # Predict (model returns logits → apply sigmoid for probabilities)
     with torch.no_grad():
-        pred = torch.sigmoid(model(inp)).squeeze(0).cpu().numpy()  # [3, img_size, img_size]
+        pred = torch.sigmoid(model(inp)).squeeze(0).cpu().numpy()  # [2, img_size, img_size]
 
     # CHW → HWC
-    pred = pred.transpose(1, 2, 0)  # [img_size, img_size, 3]
+    pred = pred.transpose(1, 2, 0)  # [img_size, img_size, 2]
 
     # Resize back to original
     pred = cv2.resize(pred, (W_orig, H_orig), interpolation=cv2.INTER_LINEAR)
@@ -113,7 +119,12 @@ def apply_inpaint(img_rgb, mask_binary, inpaint_radius=3):
 def process_image(img_path, model, device,
                   threshold=0.5, img_size=512,
                   do_grid_removal=True,
-                  inpaint_radius=3):
+                  inpaint_radius=3,
+                  do_trace=True,
+                  do_ocr=True,
+                  max_trace_len=300,
+                  ocr_padding=3,
+                  ocr_min_conf=30):
     """
     Tek bir görüntü için tam pipeline.
 
@@ -121,10 +132,12 @@ def process_image(img_path, model, device,
         dict: {
             'original': RGB,
             'after_grid': RGB,
-            'pred_mask_raw': [H,W,3] float,
+            'pred_mask_raw': [H,W,2] float,
             'pred_mask_bin': [H,W] uint8,
             'result': RGB (inpainted),
-            'channels': {'arrows': mask, 'dashed': mask, 'text': mask},
+            'channels': {'arrows': mask, 'leaders': mask,
+                         'dashed': mask, 'text': mask},
+            'ocr_texts': list,
         }
     """
     # Load image (supports Turkish/unicode filenames)
@@ -145,24 +158,40 @@ def process_image(img_path, model, device,
         after_grid = img_rgb.copy()
         print(f'  Grid removal: skipped')
 
-    # Step 2: UNet prediction
+    # Step 2: UNet prediction (2 channels: arrows + dashed)
     pred_raw = predict_mask(model, after_grid, device, img_size)
     print(f'  Prediction range: [{pred_raw.min():.3f}, {pred_raw.max():.3f}]')
 
     # Step 3: Threshold
     arrows_mask = (pred_raw[:, :, 0] > threshold).astype(np.uint8) * 255
     dashed_mask = (pred_raw[:, :, 1] > threshold).astype(np.uint8) * 255
-    text_mask = (pred_raw[:, :, 2] > threshold).astype(np.uint8) * 255
-
-    # Combined mask for inpainting
-    combined_mask = np.maximum(np.maximum(arrows_mask, dashed_mask), text_mask)
 
     n_arrow = arrows_mask.sum() // 255
     n_dashed = dashed_mask.sum() // 255
-    n_text = text_mask.sum() // 255
-    print(f'  Detected pixels — arrows: {n_arrow}, dashed: {n_dashed}, text: {n_text}')
+    print(f'  UNet detected — arrows: {n_arrow}, dashed: {n_dashed}')
 
-    # Step 4: Inpaint
+    # Step 4: Postprocess (arrow trace + OCR)
+    pp_result = build_inpaint_mask(
+        after_grid, arrows_mask, dashed_mask,
+        trace_leaders=do_trace,
+        use_ocr=do_ocr,
+        max_trace_len=max_trace_len,
+        ocr_padding=ocr_padding,
+        ocr_min_conf=ocr_min_conf,
+    )
+
+    combined_mask = pp_result['combined']
+    leader_mask = pp_result['leaders']
+    text_mask = pp_result['text']
+    ocr_texts = pp_result['ocr_texts']
+
+    n_leader = leader_mask.sum() // 255
+    n_text = text_mask.sum() // 255
+    print(f'  Postprocess — leaders: {n_leader}, text(OCR): {n_text}')
+    if ocr_texts:
+        print(f'  OCR texts: {[t["text"] for t in ocr_texts[:10]]}')
+
+    # Step 5: Inpaint
     result = apply_inpaint(after_grid, combined_mask, inpaint_radius)
     print(f'  Inpaint complete')
 
@@ -174,9 +203,11 @@ def process_image(img_path, model, device,
         'result': result,
         'channels': {
             'arrows': arrows_mask,
+            'leaders': leader_mask,
             'dashed': dashed_mask,
             'text': text_mask,
         },
+        'ocr_texts': ocr_texts,
     }
 
 
@@ -190,7 +221,7 @@ def show_results(output, title='', save_path=None):
     matplotlib.use('TkAgg')  # Local display
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(2, 4, figsize=(22, 10))
 
     # Row 1: Pipeline
     axes[0, 0].imshow(output['original'])
@@ -199,25 +230,34 @@ def show_results(output, title='', save_path=None):
     axes[0, 1].imshow(output['after_grid'])
     axes[0, 1].set_title('2. After Grid Removal')
 
-    axes[0, 2].imshow(output['result'])
-    axes[0, 2].set_title('6. Final Result (Inpainted)')
+    axes[0, 2].imshow(output['pred_mask_bin'], cmap='gray')
+    axes[0, 2].set_title('5. Combined Mask')
 
-    # Row 2: Masks
-    # RGB mask visualization
-    mask_rgb = np.stack([
-        output['channels']['arrows'],
-        output['channels']['dashed'],
-        output['channels']['text'],
+    axes[0, 3].imshow(output['result'])
+    axes[0, 3].set_title('6. Final Result (Inpainted)')
+
+    # Row 2: Individual masks
+    # UNet mask (arrows=R, dashed=G, zeroed B)
+    ch = output['channels']
+    unet_rgb = np.stack([ch['arrows'], ch['dashed'],
+                         np.zeros_like(ch['arrows'])], axis=-1)
+    axes[1, 0].imshow(unet_rgb)
+    axes[1, 0].set_title('3a. UNet (R=arrow G=dash)')
+
+    axes[1, 1].imshow(ch['leaders'], cmap='gray')
+    axes[1, 1].set_title('3b. Leader Lines (traced)')
+
+    axes[1, 2].imshow(ch['text'], cmap='gray')
+    axes[1, 2].set_title('3c. Text (OCR)')
+
+    # All channels combined color
+    all_rgb = np.stack([
+        np.maximum(ch['arrows'], ch['leaders']),  # R = arrows + leaders
+        ch['dashed'],                              # G = dashed
+        ch['text'],                                # B = text
     ], axis=-1)
-
-    axes[1, 0].imshow(output['pred_mask_raw'])
-    axes[1, 0].set_title('3. Predicted Mask (raw)')
-
-    axes[1, 1].imshow(mask_rgb)
-    axes[1, 1].set_title('4. Thresholded (R=arrow G=dash B=text)')
-
-    axes[1, 2].imshow(output['pred_mask_bin'], cmap='gray')
-    axes[1, 2].set_title('5. Combined Mask (for inpaint)')
+    axes[1, 3].imshow(all_rgb)
+    axes[1, 3].set_title('4. All Channels (R=arrow G=dash B=text)')
 
     for ax in axes.flat:
         ax.axis('off')
@@ -245,6 +285,8 @@ def save_results(output, out_dir, basename):
                 cv2.cvtColor(output['result'], cv2.COLOR_RGB2BGR))
     cv2.imwrite(os.path.join(out_dir, f'{basename}_mask_arrows.png'),
                 output['channels']['arrows'])
+    cv2.imwrite(os.path.join(out_dir, f'{basename}_mask_leaders.png'),
+                output['channels']['leaders'])
     cv2.imwrite(os.path.join(out_dir, f'{basename}_mask_dashed.png'),
                 output['channels']['dashed'])
     cv2.imwrite(os.path.join(out_dir, f'{basename}_mask_text.png'),
@@ -274,6 +316,10 @@ def main():
                         help='Model input size')
     parser.add_argument('--no-grid-removal', action='store_true',
                         help='Skip grid removal step')
+    parser.add_argument('--no-trace', action='store_true',
+                        help='Skip arrow leader line tracing')
+    parser.add_argument('--no-ocr', action='store_true',
+                        help='Skip Tesseract OCR text detection')
     parser.add_argument('--save-dir', type=str, default=None,
                         help='Save results to this directory')
     parser.add_argument('--no-show', action='store_true',
@@ -305,6 +351,8 @@ def main():
                 threshold=args.threshold,
                 img_size=args.img_size,
                 do_grid_removal=not args.no_grid_removal,
+                do_trace=not args.no_trace,
+                do_ocr=not args.no_ocr,
             )
 
             basename = os.path.splitext(os.path.basename(img_path))[0]

@@ -81,7 +81,7 @@ def run_training(
         print(f'  VRAM: {vram:.1f} GB')
 
     # ── Model ──
-    model = UNet(in_channels=3, out_channels=3).to(device)
+    model = UNet(in_channels=3, out_channels=2).to(device)
     n_params = count_parameters(model)
     print(f'Model: UNet-64 ({n_params:,} params ≈ {n_params/1e6:.1f}M)')
 
@@ -247,17 +247,26 @@ def _visualize_predictions(model, dataset, device, epoch, save_dir):
             axes[row, 0].imshow(inp.permute(1, 2, 0).numpy())
             axes[row, 0].set_title('Input' if row == 0 else '')
 
-            # Ground truth mask
-            axes[row, 1].imshow(gt.permute(1, 2, 0).numpy())
-            axes[row, 1].set_title('Ground Truth' if row == 0 else '')
+            # Ground truth mask (2ch → 3ch görselleştirme)
+            gt_vis = torch.zeros(3, gt.shape[1], gt.shape[2])
+            gt_vis[0] = gt[0]  # arrows → R
+            gt_vis[1] = gt[1]  # dashed → G
+            axes[row, 1].imshow(gt_vis.permute(1, 2, 0).numpy())
+            axes[row, 1].set_title('Ground Truth (R=arrow G=dash)' if row == 0 else '')
 
-            # Predicted mask (raw)
-            axes[row, 2].imshow(pred.permute(1, 2, 0).numpy())
+            # Predicted mask (raw, 2ch → 3ch)
+            pred_vis = torch.zeros(3, pred.shape[1], pred.shape[2])
+            pred_vis[0] = pred[0]
+            pred_vis[1] = pred[1]
+            axes[row, 2].imshow(pred_vis.permute(1, 2, 0).numpy())
             axes[row, 2].set_title('Prediction' if row == 0 else '')
 
             # Thresholded (binary)
             binary = (pred > 0.5).float()
-            axes[row, 3].imshow(binary.permute(1, 2, 0).numpy())
+            bin_vis = torch.zeros(3, binary.shape[1], binary.shape[2])
+            bin_vis[0] = binary[0]
+            bin_vis[1] = binary[1]
+            axes[row, 3].imshow(bin_vis.permute(1, 2, 0).numpy())
             axes[row, 3].set_title('Threshold>0.5' if row == 0 else '')
 
     for ax in axes.flat:
@@ -318,7 +327,7 @@ def evaluate_model(model_path, n_samples=100, img_size=512, threshold=0.5):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Load model
-    model = UNet(in_channels=3, out_channels=3).to(device)
+    model = UNet(in_channels=3, out_channels=2).to(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -326,7 +335,7 @@ def evaluate_model(model_path, n_samples=100, img_size=512, threshold=0.5):
     dataset = get_torch_dataset(n_samples=n_samples, W=img_size, H=img_size)
     loader = DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
 
-    channel_names = ['Arrow (R)', 'Dashed (G)', 'Text (B)']
+    channel_names = ['Arrow', 'Dashed']
     metrics = {ch: {'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0} for ch in channel_names}
 
     with torch.no_grad():

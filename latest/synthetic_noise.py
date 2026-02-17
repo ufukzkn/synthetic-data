@@ -234,45 +234,76 @@ def _draw_axes_lines(ax, cfg: ChartConfig):
 def _generate_arrow_specs(cfg, curves_data):
     """
     Ok pozisyonlarını hesapla (data koordinatları).
-    Döndürür: list of (x_tail, y_tail, x_head, y_head, line_thickness)
+
+    Gerçek F-18 grafik deseni:
+      - Her okun kuyruğu (tail) bir text etiketinin yanında
+      - Ok ucu (head) eğrinin sağ ucuna veya ortasına gidiyor
+      - Bazı oklar eğrileri ortadan kesebilir
+      - Oklar her zaman paralel değil, açıları değişken
+      - Her okun yanında text var ama her text'in yanında ok yok
+
+    Döndürür: list of (x_tail, y_tail, x_head, y_head, line_thickness,
+                       tip_len, is_hollow, has_label)
+    has_label=True ise bu ok'un kuyruğunda bir text etiketi olacak.
     """
     specs = []
+
     for idx, (cx, cy) in enumerate(reversed(curves_data)):
         if idx >= 12:
             break
         if random.random() < 0.15:
             continue
 
-        # Ok ucu hedef noktası — eğrinin orta bölgesinde (%15-%75)
-        aidx = random.randint(len(cx) // 7, 3 * len(cx) // 4)
+        # ── Ok ucu hedef noktası ──
+        # %65 sağ uca (eğrinin bitişi), %35 ortaya
+        if random.random() < 0.65:
+            # Sağ uç — son %10-%25 arasından
+            aidx = random.randint(int(len(cx) * 0.75), len(cx) - 1)
+        else:
+            # Orta bölge — eğriyi kesebilir
+            aidx = random.randint(len(cx) // 5, int(len(cx) * 0.70))
 
         x_head, y_head = cx[aidx], cy[aidx]
-        angle = random.uniform(20, 70)
-        dist = random.uniform(0.04, 0.10)
-        sign = random.choice([1, -1])
-        dx = dist * math.cos(math.radians(angle))
-        dy = dist * math.sin(math.radians(angle)) * sign
+
+        # ── Ok kuyruğu — text etiketinin olacağı yer ──
+        # Kuyruk her zaman eğrinin dışında, genelde sağ tarafta/yukarıda
+        angle = random.uniform(15, 80)
+        dist = random.uniform(0.04, 0.12)
+        # Genelde kuyruk sağa ve yukarıya doğru (text label bölgesi)
+        dx_sign = random.choice([1, 1, 1, -1])  # %75 sağa
+        dy_sign = random.choice([1, -1])         # eşit yukarı/aşağı
+        dx = dist * math.cos(math.radians(angle)) * dx_sign
+        dy = dist * math.sin(math.radians(angle)) * dy_sign
         x_tail = x_head + dx
         y_tail = y_head + dy
+
         thickness = 1
-        tip_len = random.randint(14, 24)       # uzun sivri ok ucu
-        is_hollow = random.random() < 0.45     # ~%45 içi boş
+        tip_len = random.randint(12, 24)
+        is_hollow = random.random() < 0.45
+
+        # Her ok'un label'ı var (metnin ucunda ok)
+        has_label = True
 
         specs.append((x_tail, y_tail, x_head, y_head, thickness,
-                      tip_len, is_hollow))
+                      tip_len, is_hollow, has_label))
 
-    # Ekstra bağımsız oklar
-    n_extra = random.randint(0, 3)
+    # ── Ekstra bağımsız oklar (label'sız olabilir) ──
+    n_extra = random.randint(0, 2)
     for _ in range(n_extra):
-        xh = cfg.x_min + (cfg.x_max - cfg.x_min) * random.uniform(0.15, 0.85)
-        yh = cfg.y_min + (cfg.y_max - cfg.y_min) * random.uniform(0.15, 0.85)
-        ang = random.uniform(15, 75)
-        d = random.uniform(0.04, 0.08)
-        xt = xh + d * math.cos(math.radians(ang))
+        # Rastgele bir eğriye doğru
+        ci = random.randint(0, len(curves_data) - 1)
+        cx, cy = curves_data[ci]
+        aidx = random.randint(len(cx) // 4, len(cx) - 1)
+        xh, yh = cx[aidx], cy[aidx]
+        ang = random.uniform(15, 80)
+        d = random.uniform(0.04, 0.10)
+        xt = xh + d * math.cos(math.radians(ang)) * random.choice([1, -1])
         yt = yh + d * math.sin(math.radians(ang)) * random.choice([1, -1])
-        tip_len = random.randint(14, 22)
+        tip_len = random.randint(12, 22)
         is_hollow = random.random() < 0.45
-        specs.append((xt, yt, xh, yh, 1, tip_len, is_hollow))
+        # Ekstra okların %50'sinde label yok
+        has_label = random.random() < 0.50
+        specs.append((xt, yt, xh, yh, 1, tip_len, is_hollow, has_label))
 
     return specs
 
@@ -376,303 +407,13 @@ def _draw_arrows_on_img(img, arrow_specs, cfg, W, H, color=(0, 0, 0),
 
     draw_fn = _draw_arrow_pil if use_pil else _draw_arrow_cv2
 
-    for (xt, yt, xh, yh, thick, tip_len, is_hollow) in arrow_specs:
+    for spec in arrow_specs:
+        # Unpack — has_label dahil (ama çizimde kullanılmaz)
+        xt, yt, xh, yh, thick, tip_len, is_hollow = spec[:7]
         pt_tail = _data_to_px(xt, yt, cfg, W, H)
         pt_head = _data_to_px(xh, yh, cfg, W, H)
         draw_fn(img, pt_tail, pt_head, thickness=thick,
                 tip_length=tip_len, color=color, hollow=is_hollow)
-    return img
-
-
-# ════════════════════════════════════════════════════════════════
-# DIRECTION ARROWS (küçük yön okları eğriler üzerinde)
-# ════════════════════════════════════════════════════════════════
-
-def _generate_direction_arrow_specs(cfg, curves_data, W, H):
-    """
-    Eğriler üzerinde küçük yön okları oluştur.
-    Gerçek F-18 grafiklerindeki gibi: eğri boyunca düzenli aralıklarla
-    küçük dolu üçgenler (chevron), eğrinin teğetine hizalı.
-
-    Returns:
-        list of dict: Her ok için {curve_pts, indices, size, filled}
-    """
-    specs = []
-
-    for curve_idx, (cx, cy) in enumerate(curves_data):
-        # Her eğri %75 olasılıkla direction arrow alır
-        if random.random() < 0.25:
-            continue
-
-        # Eğri noktalarını piksel koordinatlarına çevir
-        pts_px = []
-        for xi, yi in zip(cx, cy):
-            px, py = _data_to_px(xi, yi, cfg, W, H)
-            pts_px.append((px, py))
-
-        # Eğri boyunca kümülatif mesafe hesapla
-        cum_dist = [0.0]
-        for i in range(1, len(pts_px)):
-            dx = pts_px[i][0] - pts_px[i-1][0]
-            dy = pts_px[i][1] - pts_px[i-1][1]
-            cum_dist.append(cum_dist[-1] + math.sqrt(dx*dx + dy*dy))
-
-        total_len = cum_dist[-1]
-        if total_len < 60:
-            continue
-
-        # Ok aralığı ve boyutu
-        spacing = random.uniform(25, 55)  # piksel aralığı
-        arrow_size = random.uniform(4, 9)  # üçgen boyutu (px)
-        filled = random.random() < 0.90   # %90 dolu
-        # Başlangıç ofseti — eğrinin başından biraz sonra başla
-        start_offset = random.uniform(15, 50)
-        # Yön: %80 soldan sağa (artan x), %20 ters
-        reverse_dir = random.random() < 0.20
-
-        # Ok pozisyonlarını hesapla
-        arrow_positions = []
-        d = start_offset
-        while d < total_len - 10:
-            # Bu mesafeye karşılık gelen indeks bul (binary search)
-            idx = 0
-            for j in range(1, len(cum_dist)):
-                if cum_dist[j] >= d:
-                    idx = j
-                    break
-            if idx == 0:
-                idx = 1
-
-            # Teğet yönünü hesapla (önceki ve sonraki noktadan)
-            i_prev = max(0, idx - 2)
-            i_next = min(len(pts_px) - 1, idx + 2)
-            tx = pts_px[i_next][0] - pts_px[i_prev][0]
-            ty = pts_px[i_next][1] - pts_px[i_prev][1]
-            t_len = math.sqrt(tx*tx + ty*ty)
-            if t_len < 0.5:
-                d += spacing
-                continue
-            tx /= t_len
-            ty /= t_len
-
-            if reverse_dir:
-                tx, ty = -tx, -ty
-
-            arrow_positions.append({
-                'cx': pts_px[idx][0],
-                'cy': pts_px[idx][1],
-                'tx': tx,
-                'ty': ty,
-            })
-            d += spacing
-
-        if len(arrow_positions) >= 2:
-            specs.append({
-                'positions': arrow_positions,
-                'size': arrow_size,
-                'filled': filled,
-            })
-
-    return specs
-
-
-def _draw_direction_arrows_on_img(img, dir_arrow_specs, color=(0, 0, 0)):
-    """
-    Eğriler üzerindeki küçük yön oklarını (üçgenleri) çiz.
-    Her üçgen teğet yönüne bakacak şekilde hizalanır.
-    """
-    for spec in dir_arrow_specs:
-        sz = spec['size']
-        filled = spec['filled']
-
-        for pos in spec['positions']:
-            cx, cy = pos['cx'], pos['cy']
-            tx, ty = pos['tx'], pos['ty']
-
-            # Normal vektör (teğete dik)
-            nx, ny = -ty, tx
-
-            # Üçgenin 3 köşesi: uç (ileri), sol-arka, sağ-arka
-            tip_x = cx + tx * sz * 0.6
-            tip_y = cy + ty * sz * 0.6
-            back_x = cx - tx * sz * 0.4
-            back_y = cy - ty * sz * 0.4
-
-            wing = sz * 0.35
-            left_x = back_x + nx * wing
-            left_y = back_y + ny * wing
-            right_x = back_x - nx * wing
-            right_y = back_y - ny * wing
-
-            pts = np.array([
-                [int(tip_x), int(tip_y)],
-                [int(left_x), int(left_y)],
-                [int(right_x), int(right_y)],
-            ], dtype=np.int32)
-
-            if filled:
-                cv2.fillPoly(img, [pts], color, cv2.LINE_AA)
-            else:
-                cv2.polylines(img, [pts], isClosed=True, color=color,
-                              thickness=1, lineType=cv2.LINE_AA)
-
-    return img
-
-
-# ════════════════════════════════════════════════════════════════
-# CURVED DASHED LINES (eğri takip eden kesik çizgiler)
-# ════════════════════════════════════════════════════════════════
-
-def _generate_curved_dashed_specs(cfg, curves_data, W, H):
-    """
-    Eğrilere paralel curved dashed line'lar oluştur.
-    Gerçek F-18 grafiklerinde solid eğrilerin yanı sıra
-    aynı profili takip eden dashed eğriler de var.
-
-    Returns:
-        list of dict: Her curved dashed line için
-            {pts_px, dash_len, gap_len, thickness}
-    """
-    specs = []
-    n_curved = random.randint(1, 4)
-
-    for _ in range(n_curved):
-        # Mevcut eğrilerden birini referans al
-        ref_idx = random.randint(0, len(curves_data) - 1)
-        cx, cy = curves_data[ref_idx]
-
-        # Eğriyi Y ekseninde biraz kaydır (offset)
-        y_range = cfg.y_max - cfg.y_min
-        offset = random.uniform(-0.03, 0.03) * y_range
-        # Çok küçük offset'leri atla (solid eğriyle çakışır)
-        if abs(offset) < 0.008 * y_range:
-            offset = 0.015 * y_range * (1 if offset >= 0 else -1)
-
-        cy_shifted = cy + offset
-
-        # Eğri noktalarını piksel koordinatlarına çevir
-        pts_px = []
-        for xi, yi in zip(cx, cy_shifted):
-            px, py = _data_to_px(xi, yi, cfg, W, H)
-            pts_px.append((px, py))
-
-        # Dash parametreleri
-        dash_len = random.randint(6, 22)
-        # Dash:gap oranları: 1:1, 2:1, 3:1, 1:2
-        ratio_choices = [(1, 1), (2, 1), (3, 1), (1, 2), (3, 2)]
-        d_ratio, g_ratio = random.choice(ratio_choices)
-        gap_len = max(3, int(dash_len * g_ratio / d_ratio))
-        thickness = random.choice([1, 1, 1, 2])  # çoğunlukla 1px
-
-        specs.append({
-            'pts_px': pts_px,
-            'dash_len': dash_len,
-            'gap_len': gap_len,
-            'thickness': thickness,
-        })
-
-    # Ayrıca tamamen yeni eğri profili olan curved dashed'ler de ekle
-    n_independent = random.randint(0, 2)
-    for _ in range(n_independent):
-        # Yeni rastgele eğri oluştur
-        x = np.linspace(cfg.x_min + 0.02, cfg.x_max - 0.02, 300)
-        y_norm = generate_curve_shape(x, cfg.curve_type,
-                                       random.randint(0, 6), 7)
-        y = cfg.y_min + y_norm * (cfg.y_max - cfg.y_min)
-        y = np.clip(y, cfg.y_min + 0.008, cfg.y_max - 0.008)
-
-        pts_px = []
-        for xi, yi in zip(x, y):
-            px, py = _data_to_px(xi, yi, cfg, W, H)
-            pts_px.append((px, py))
-
-        dash_len = random.randint(6, 22)
-        ratio_choices = [(1, 1), (2, 1), (3, 1), (1, 2)]
-        d_ratio, g_ratio = random.choice(ratio_choices)
-        gap_len = max(3, int(dash_len * g_ratio / d_ratio))
-        thickness = random.choice([1, 1, 2])
-
-        specs.append({
-            'pts_px': pts_px,
-            'dash_len': dash_len,
-            'gap_len': gap_len,
-            'thickness': thickness,
-        })
-
-    return specs
-
-
-def _draw_curved_dashed_line(img, pts_px, dash_len, gap_len,
-                              thickness=1, color=(0, 0, 0)):
-    """
-    Eğri noktaları boyunca yürüyerek dash-gap-dash-gap çiz.
-    Eğrinin şeklini takip eder (düz çizgi DEĞİL).
-    """
-    if len(pts_px) < 2:
-        return
-
-    # Kümülatif mesafe
-    cum = [0.0]
-    for i in range(1, len(pts_px)):
-        dx = pts_px[i][0] - pts_px[i-1][0]
-        dy = pts_px[i][1] - pts_px[i-1][1]
-        cum.append(cum[-1] + math.sqrt(dx*dx + dy*dy))
-
-    total = cum[-1]
-    if total < 5:
-        return
-
-    def _interp(d):
-        """Mesafe d'ye karşılık gelen (x,y) noktası (lineer interpolasyon)."""
-        d = max(0, min(d, total))
-        for j in range(1, len(cum)):
-            if cum[j] >= d:
-                seg = cum[j] - cum[j-1]
-                if seg < 1e-6:
-                    return pts_px[j]
-                t = (d - cum[j-1]) / seg
-                x = pts_px[j-1][0] + t * (pts_px[j][0] - pts_px[j-1][0])
-                y = pts_px[j-1][1] + t * (pts_px[j][1] - pts_px[j-1][1])
-                return (int(round(x)), int(round(y)))
-        return pts_px[-1]
-
-    # Dash-gap yürüyüşü
-    dist = 0.0
-    drawing = True
-    while dist < total:
-        seg_len = dash_len if drawing else gap_len
-        seg_end = min(dist + seg_len, total)
-
-        if drawing:
-            # Bu dash segmentinin noktalarını topla
-            dash_pts = [_interp(dist)]
-            d = dist
-            step = max(1.5, min(3.0, seg_len / 5))
-            while d < seg_end:
-                d += step
-                if d > seg_end:
-                    d = seg_end
-                dash_pts.append(_interp(d))
-
-            # Polyline olarak çiz
-            if len(dash_pts) >= 2:
-                pts_arr = np.array(dash_pts, dtype=np.int32)
-                cv2.polylines(img, [pts_arr], isClosed=False,
-                              color=color, thickness=thickness,
-                              lineType=cv2.LINE_AA)
-
-        dist = seg_end
-        drawing = not drawing
-
-
-def _draw_curved_dashed_on_img(img, curved_dashed_specs, color=(0, 0, 0)):
-    """Tüm curved dashed spec'lerini çiz."""
-    for spec in curved_dashed_specs:
-        _draw_curved_dashed_line(
-            img, spec['pts_px'],
-            spec['dash_len'], spec['gap_len'],
-            spec['thickness'], color
-        )
     return img
 
 
@@ -694,7 +435,8 @@ def _generate_dashed_specs(cfg, n_lines=None, W=512, H=512, arrow_specs=None):
 
     # ── Ok ucundan (sivri uç) çıkan kesikli çizgiler ──
     if arrow_specs:
-        for (xt, yt, xh, yh, thick, tip_len, is_hollow) in arrow_specs:
+        for spec in arrow_specs:
+            xt, yt, xh, yh, thick, tip_len, is_hollow = spec[:7]
             if random.random() < 0.45:  # ~%45 ihtimalle ok ucuna kesikli ekle
                 # Ok yön vektörü: tail→head (okun işaret ettiği yön)
                 pt_tail = _data_to_px(xt, yt, cfg, W, H)
@@ -739,7 +481,12 @@ def _generate_dashed_specs(cfg, n_lines=None, W=512, H=512, arrow_specs=None):
         herd_size = random.randint(5, 15)
         spacing_px = random.uniform(10, 22)
 
-        seg = random.randint(10, 18)
+        seg = random.randint(6, 22)
+        # Dash:gap oranı — çeşitlendirilmiş
+        ratio_choices = [(1, 1), (2, 1), (3, 1), (1, 2), (3, 2)]
+        d_ratio, g_ratio = random.choice(ratio_choices)
+        gap = max(3, int(seg * g_ratio / d_ratio))
+        herd_thick = random.choice([1, 1, 1, 2])  # çoğunlukla 1, bazen 2
 
         # Her çizgi için rastgele tire sayısı (min 6, max 10)
         # 2-3 farklı uzunluk grubu oluştur
@@ -753,7 +500,7 @@ def _generate_dashed_specs(cfg, n_lines=None, W=512, H=512, arrow_specs=None):
 
             # Bu çizginin tire sayısı — rastgele bir uzunluk grubundan
             n_dashes_j = random.choice(length_options)
-            line_len_px = n_dashes_j * 2 * seg
+            line_len_px = n_dashes_j * (seg + gap)
 
             half = line_len_px / 2
             sx = mx - dir_x * half
@@ -762,7 +509,7 @@ def _generate_dashed_specs(cfg, n_lines=None, W=512, H=512, arrow_specs=None):
             ey = my + dir_y * half
             d_sx, d_sy = _px_to_data(sx, sy, cfg, W, H)
             d_ex, d_ey = _px_to_data(ex, ey, cfg, W, H)
-            specs.append((d_sx, d_sy, d_ex, d_ey, seg, seg, 1))
+            specs.append((d_sx, d_sy, d_ex, d_ey, seg, gap, herd_thick))
 
     # ── Tekil çizgiler — uzun, düzgün kesikli çizgi ──
     # Kesişme kontrolü: yeni çizgi mevcut çizgilerle kesişiyorsa atla
@@ -770,9 +517,14 @@ def _generate_dashed_specs(cfg, n_lines=None, W=512, H=512, arrow_specs=None):
     for _ in range(n_singles):
         cx_px = random.uniform(W * 0.15, W * 0.85)
         cy_px = random.uniform(H * 0.15, H * 0.85)
-        seg = random.randint(10, 18)
+        seg = random.randint(6, 22)
+        # Dash:gap oranı çeşitlendirilmiş
+        ratio_choices = [(1, 1), (2, 1), (3, 1), (1, 2), (3, 2)]
+        d_ratio, g_ratio = random.choice(ratio_choices)
+        gap = max(3, int(seg * g_ratio / d_ratio))
+        thick = random.choice([1, 1, 1, 2])
         n_dashes = random.randint(4, 10)
-        line_len_px = n_dashes * 2 * seg
+        line_len_px = n_dashes * (seg + gap)
         angle_deg = random.choice([0, 20, 30, 45, 55, 65, 75, 90])
         angle = math.radians(angle_deg)
         dir_x = math.cos(angle)
@@ -797,7 +549,7 @@ def _generate_dashed_specs(cfg, n_lines=None, W=512, H=512, arrow_specs=None):
         if intersects:
             continue
 
-        specs.append((d_sx, d_sy, d_ex, d_ey, seg, seg, 1))
+        specs.append((d_sx, d_sy, d_ex, d_ey, seg, gap, thick))
 
     return specs
 
@@ -865,17 +617,42 @@ def _draw_dashed_on_img(img, dashed_specs, cfg, W, H, color=(0, 0, 0)):
 # ════════════════════════════════════════════════════════════════
 
 def _draw_text_labels(ax, cfg: ChartConfig, arrow_specs=None, color='black'):
-    """Metin etiketleri — yakıt akışı sayıları, eksen başlıkları."""
+    """Metin etiketleri — yakıt akışı sayıları, eksen başlıkları.
+
+    Gerçek F-18 deseni: Her okun kuyruğunda text olabilir.
+    has_label=True olan oklara metin eklenir.
+    Ayrıca oksuz bağımsız metinler de olabilir.
+    """
     fuel_flows = ['3000', '3500', '4000', '4500', '5000', '5500',
-                  '6000', '6500', '7000', '7500', '8000', '8500']
+                  '6000', '6500', '7000', '7500', '8000', '8500',
+                  '9000', '9500', '10000']
+    label_idx = 0
     if arrow_specs:
-        for i, (xt, yt, _, _, _, _, _) in enumerate(arrow_specs):
-            if i >= len(fuel_flows):
+        for spec in arrow_specs:
+            xt, yt = spec[0], spec[1]
+            has_label = spec[7] if len(spec) > 7 else True
+            if not has_label:
+                continue
+            if label_idx >= len(fuel_flows):
                 break
-            lx = xt + random.uniform(0.03, 0.08)
-            ax.text(lx, yt + random.uniform(-0.002, 0.002),
-                    fuel_flows[i], fontsize=random.randint(7, 9),
+            # Metin okun kuyruğunun hemen yanında
+            lx = xt + random.uniform(0.005, 0.025)
+            ax.text(lx, yt + random.uniform(-0.003, 0.003),
+                    fuel_flows[label_idx], fontsize=random.randint(7, 9),
                     va='center', ha='left', color=color)
+            label_idx += 1
+
+    # Oksuz bağımsız metinler (%40)
+    n_extra_texts = random.randint(0, 3)
+    for _ in range(n_extra_texts):
+        if label_idx >= len(fuel_flows):
+            break
+        tx = cfg.x_min + (cfg.x_max - cfg.x_min) * random.uniform(0.5, 0.92)
+        ty = cfg.y_min + (cfg.y_max - cfg.y_min) * random.uniform(0.1, 0.9)
+        ax.text(tx, ty, fuel_flows[label_idx],
+                fontsize=random.randint(7, 9),
+                va='center', ha='left', color=color)
+        label_idx += 1
 
     if random.random() < 0.7:
         ax.text((cfg.x_min + cfg.x_max) / 2,
@@ -1023,10 +800,8 @@ def make_sample(W: int = 512, H: int = 512, seed: int = None,
 
     # ── 3. Gürültü pozisyonlarını hesapla (seed'li) ──
     arrow_specs = _generate_arrow_specs(cfg, curves_data) if cfg.add_arrows else []
-    dir_arrow_specs = _generate_direction_arrow_specs(cfg, curves_data, W, H) if cfg.add_arrows else []
     dashed_specs = _generate_dashed_specs(cfg, W=W, H=H,
                                           arrow_specs=arrow_specs) if cfg.add_dashed_lines else []
-    curved_dashed_specs = _generate_curved_dashed_specs(cfg, curves_data, W, H) if cfg.add_dashed_lines else []
 
     # ── 4. Input görüntüsü: base + oklar + kesikler + metin ──
     input_img = base_img.copy()
@@ -1037,17 +812,9 @@ def make_sample(W: int = 512, H: int = 512, seed: int = None,
         _draw_arrows_on_img(input_img, arrow_specs, cfg, W, H,
                             color=(0, 0, 0), use_pil=arrow_use_pil)
 
-    # Yön okları (direction arrows)
-    if dir_arrow_specs:
-        _draw_direction_arrows_on_img(input_img, dir_arrow_specs, color=(0, 0, 0))
-
     # cv2 ile düz kesik çizgiler
     if dashed_specs:
         _draw_dashed_on_img(input_img, dashed_specs, cfg, W, H, color=(0, 0, 0))
-
-    # Eğri takip eden kesik çizgiler (curved dashed)
-    if curved_dashed_specs:
-        _draw_curved_dashed_on_img(input_img, curved_dashed_specs, color=(0, 0, 0))
 
     # matplotlib ile metin (input üzerine overlay)
     if cfg.add_text_labels or cfg.add_text_boxes:
@@ -1065,7 +832,7 @@ def make_sample(W: int = 512, H: int = 512, seed: int = None,
         input_img[text_pixels] = text_layer[text_pixels]
 
     # ── 5. Mask katmanları ──
-    # Arrow mask (R kanalı) — callout oklar + direction oklar
+    # Arrow mask (R kanalı) — callout oklar
     arrow_mask = np.zeros((H, W), dtype=np.uint8)
     if arrow_specs:
         arrow_canvas = np.zeros((H, W, 3), dtype=np.uint8)
@@ -1073,15 +840,8 @@ def make_sample(W: int = 512, H: int = 512, seed: int = None,
                             color=(255, 255, 255), use_pil=arrow_use_pil)
         arrow_mask = cv2.cvtColor(arrow_canvas, cv2.COLOR_RGB2GRAY)
         _, arrow_mask = cv2.threshold(arrow_mask, 20, 255, cv2.THRESH_BINARY)
-    if dir_arrow_specs:
-        dir_canvas = np.zeros((H, W, 3), dtype=np.uint8)
-        _draw_direction_arrows_on_img(dir_canvas, dir_arrow_specs,
-                                       color=(255, 255, 255))
-        dir_gray = cv2.cvtColor(dir_canvas, cv2.COLOR_RGB2GRAY)
-        _, dir_bin = cv2.threshold(dir_gray, 20, 255, cv2.THRESH_BINARY)
-        arrow_mask = np.maximum(arrow_mask, dir_bin)
 
-    # Dashed mask (G kanalı) — düz kesikler + eğri kesikler
+    # Dashed mask (Ch1) — düz kesikler
     dashed_mask = np.zeros((H, W), dtype=np.uint8)
     if dashed_specs:
         dashed_canvas = np.zeros((H, W, 3), dtype=np.uint8)
@@ -1089,28 +849,10 @@ def make_sample(W: int = 512, H: int = 512, seed: int = None,
                             color=(255, 255, 255))
         dashed_mask = cv2.cvtColor(dashed_canvas, cv2.COLOR_RGB2GRAY)
         _, dashed_mask = cv2.threshold(dashed_mask, 20, 255, cv2.THRESH_BINARY)
-    if curved_dashed_specs:
-        cd_canvas = np.zeros((H, W, 3), dtype=np.uint8)
-        _draw_curved_dashed_on_img(cd_canvas, curved_dashed_specs,
-                                    color=(255, 255, 255))
-        cd_gray = cv2.cvtColor(cd_canvas, cv2.COLOR_RGB2GRAY)
-        _, cd_bin = cv2.threshold(cd_gray, 20, 255, cv2.THRESH_BINARY)
-        dashed_mask = np.maximum(dashed_mask, cd_bin)
 
-    # Text mask (B kanalı) — matplotlib ile
-    text_mask = np.zeros((H, W), dtype=np.uint8)
-    if cfg.add_text_labels or cfg.add_text_boxes:
-        fig_tm, ax_tm = _make_mask_fig(cfg, W, H)
-        if cfg.add_text_labels:
-            _draw_text_labels(ax_tm, cfg, arrow_specs, color='white')
-        if cfg.add_text_boxes:
-            _draw_text_boxes(ax_tm, cfg, color='white')
-        tm_arr = _fig_to_array(fig_tm)
-        tm_arr = cv2.resize(tm_arr, (W, H))
-        text_mask = cv2.cvtColor(tm_arr, cv2.COLOR_RGB2GRAY)
-        _, text_mask = cv2.threshold(text_mask, 20, 255, cv2.THRESH_BINARY)
-
-    noise_mask = np.stack([arrow_mask, dashed_mask, text_mask], axis=-1)
+    # 2-kanal mask: Ch0=arrows, Ch1=dashed
+    # (Text mask yok — text detection Tesseract OCR ile postprocess'te yapılır)
+    noise_mask = np.stack([arrow_mask, dashed_mask], axis=-1)
 
     # ── 6. Artifact ──
     if add_artifacts:
@@ -1164,12 +906,15 @@ if __name__ == '__main__':
         inp, mask, clean = make_sample(512, 512, seed=i * 42)
         cv2.imwrite(os.path.join(out_dir, f'test_input_{i}.png'),
                     cv2.cvtColor(inp, cv2.COLOR_RGB2BGR))
+        # Mask artık 2 kanallı — 3. kanalı siyah yap görselleştirme için
+        mask_vis = np.zeros((512, 512, 3), dtype=np.uint8)
+        mask_vis[:, :, 0] = mask[:, :, 0]  # arrows
+        mask_vis[:, :, 1] = mask[:, :, 1]  # dashed
         cv2.imwrite(os.path.join(out_dir, f'test_mask_{i}.png'),
-                    cv2.cvtColor(mask, cv2.COLOR_RGB2BGR))
+                    cv2.cvtColor(mask_vis, cv2.COLOR_RGB2BGR))
         cv2.imwrite(os.path.join(out_dir, f'test_clean_{i}.png'),
                     cv2.cvtColor(clean, cv2.COLOR_RGB2BGR))
-        print(f'  sample {i}  R(arrow)={mask[:,:,0].sum()>0}  '
-              f'G(dashed)={mask[:,:,1].sum()>0}  '
-              f'B(text)={mask[:,:,2].sum()>0}')
+        print(f'  sample {i}  Ch0(arrow)={mask[:,:,0].sum()>0}  '
+              f'Ch1(dashed)={mask[:,:,1].sum()>0}')
 
     print('Done!')
